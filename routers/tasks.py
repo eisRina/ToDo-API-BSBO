@@ -1,4 +1,5 @@
 
+from datetime import date
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -17,6 +18,13 @@ router = APIRouter(
 )
 
 
+# Автоматический расчет срочности
+def calculate_urgency(deadline_at: date) -> bool:
+    days_left = (deadline_at - date.today()).days
+    return days_left <= 3
+
+
+# Определение квадранта
 def calculate_quadrant(is_important: bool, is_urgent: bool) -> str:
     if is_important and is_urgent:
         return "Q1"
@@ -27,13 +35,26 @@ def calculate_quadrant(is_important: bool, is_urgent: bool) -> str:
     return "Q4"
 
 
+# Пересчет срочности и квадранта
+def update_deadline_logic(task: Task):
+    if task.deadline_at is not None:
+        task.is_urgent = calculate_urgency(task.deadline_at)
+
+    task.quadrant = calculate_quadrant(
+        task.is_important,
+        task.is_urgent
+    )
+
+
 # Получить все задачи
 @router.get("", response_model=List[TaskResponse])
 def get_all_tasks(db: Session = Depends(get_db)):
-    return db.scalars(select(Task).order_by(Task.id)).all()
+    return db.scalars(
+        select(Task).order_by(Task.id)
+    ).all()
 
 
-# Фильтрация по квадранту
+# Получить задачи по квадранту
 @router.get("/quadrant/{quadrant}", response_model=List[TaskResponse])
 def get_tasks_by_quadrant(
     quadrant: str,
@@ -42,7 +63,7 @@ def get_tasks_by_quadrant(
     if quadrant not in ["Q1", "Q2", "Q3", "Q4"]:
         raise HTTPException(
             status_code=400,
-            detail="Неверный квадрант. Используйте: Q1, Q2, Q3, Q4"
+            detail="Используйте Q1, Q2, Q3 или Q4"
         )
 
     return db.scalars(
@@ -50,7 +71,7 @@ def get_tasks_by_quadrant(
     ).all()
 
 
-# Фильтрация по статусу
+# Получить задачи по статусу
 @router.get("/status/{task_status}", response_model=List[TaskResponse])
 def get_tasks_by_status(
     task_status: str,
@@ -59,13 +80,13 @@ def get_tasks_by_status(
     if task_status not in ["completed", "pending"]:
         raise HTTPException(
             status_code=404,
-            detail="Статус не найден. Используйте: completed или pending"
+            detail="Используйте completed или pending"
         )
 
-    is_completed = task_status == "completed"
-
     return db.scalars(
-        select(Task).where(Task.completed == is_completed)
+        select(Task).where(
+            Task.completed == (task_status == "completed")
+        )
     ).all()
 
 
@@ -89,7 +110,7 @@ def search_tasks(
     if not tasks:
         raise HTTPException(
             status_code=404,
-            detail="Задачи по вашему запросу не найдены"
+            detail="Задачи не найдены"
         )
 
     return tasks
@@ -112,7 +133,7 @@ def get_task_by_id(
     return task
 
 
-# Создать новую задачу
+# Создать задачу с дедлайном
 @router.post(
     "/",
     response_model=TaskResponse,
@@ -122,14 +143,17 @@ def create_task(
     task: TaskCreate,
     db: Session = Depends(get_db)
 ):
+    is_urgent = calculate_urgency(task.deadline_at)
+
     new_task = Task(
         title=task.title,
         description=task.description,
         is_important=task.is_important,
-        is_urgent=task.is_urgent,
+        deadline_at=task.deadline_at,
+        is_urgent=is_urgent,
         quadrant=calculate_quadrant(
             task.is_important,
-            task.is_urgent
+            is_urgent
         ),
         completed=False
     )
@@ -161,11 +185,7 @@ def update_task(
     for field, value in update_data.items():
         setattr(task, field, value)
 
-    if "is_important" in update_data or "is_urgent" in update_data:
-        task.quadrant = calculate_quadrant(
-            task.is_important,
-            task.is_urgent
-        )
+    update_deadline_logic(task)
 
     db.commit()
     db.refresh(task)
@@ -173,7 +193,7 @@ def update_task(
     return task
 
 
-# Отметить задачу выполненной
+# Завершить задачу
 @router.patch("/{task_id}/complete", response_model=TaskResponse)
 def complete_task(
     task_id: int,
@@ -215,4 +235,6 @@ def delete_task(
     db.delete(task)
     db.commit()
 
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return Response(
+        status_code=status.HTTP_204_NO_CONTENT
+    )
