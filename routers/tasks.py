@@ -1,8 +1,12 @@
 
-from fastapi import APIRouter, HTTPException, Query, Response, status
-from datetime import datetime
+from typing import List
 
-from database import tasks_db
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import select, or_
+from sqlalchemy.orm import Session
+
+from database import get_db
+from models import Task
 from schemas import TaskCreate, TaskUpdate, TaskResponse
 
 
@@ -13,90 +17,91 @@ router = APIRouter(
 )
 
 
-# Получение всех задач
-@router.get("")
-async def get_all_tasks() -> dict:
-    return {
-        "count": len(tasks_db),
-        "tasks": tasks_db
-    }
+def calculate_quadrant(is_important: bool, is_urgent: bool) -> str:
+    if is_important and is_urgent:
+        return "Q1"
+    if is_important:
+        return "Q2"
+    if is_urgent:
+        return "Q3"
+    return "Q4"
+
+
+# Получить все задачи
+@router.get("", response_model=List[TaskResponse])
+def get_all_tasks(db: Session = Depends(get_db)):
+    return db.scalars(select(Task).order_by(Task.id)).all()
 
 
 # Фильтрация по квадранту
-@router.get("/quadrant/{quadrant}")
-async def get_tasks_by_quadrant(quadrant: str) -> dict:
+@router.get("/quadrant/{quadrant}", response_model=List[TaskResponse])
+def get_tasks_by_quadrant(
+    quadrant: str,
+    db: Session = Depends(get_db)
+):
     if quadrant not in ["Q1", "Q2", "Q3", "Q4"]:
         raise HTTPException(
             status_code=400,
             detail="Неверный квадрант. Используйте: Q1, Q2, Q3, Q4"
         )
 
-    filtered_tasks = [
-        task for task in tasks_db
-        if task["quadrant"] == quadrant
-    ]
-
-    return {
-        "quadrant": quadrant,
-        "count": len(filtered_tasks),
-        "tasks": filtered_tasks
-    }
+    return db.scalars(
+        select(Task).where(Task.quadrant == quadrant)
+    ).all()
 
 
 # Фильтрация по статусу
-@router.get("/status/{status}")
-async def get_tasks_by_status(status: str) -> dict:
-    if status not in ["completed", "pending"]:
+@router.get("/status/{task_status}", response_model=List[TaskResponse])
+def get_tasks_by_status(
+    task_status: str,
+    db: Session = Depends(get_db)
+):
+    if task_status not in ["completed", "pending"]:
         raise HTTPException(
             status_code=404,
             detail="Статус не найден. Используйте: completed или pending"
         )
 
-    filtered_tasks = [
-        task for task in tasks_db
-        if task["completed"] == (status == "completed")
-    ]
+    is_completed = task_status == "completed"
 
-    return {
-        "status": status,
-        "count": len(filtered_tasks),
-        "tasks": filtered_tasks
-    }
+    return db.scalars(
+        select(Task).where(Task.completed == is_completed)
+    ).all()
 
 
 # Поиск задач
-@router.get("/search")
-async def search_tasks(
-    q: str = Query(..., min_length=2)
-) -> dict:
-    search_query = q.strip().lower()
+@router.get("/search", response_model=List[TaskResponse])
+def search_tasks(
+    q: str = Query(..., min_length=2),
+    db: Session = Depends(get_db)
+):
+    keyword = f"%{q.strip()}%"
 
-    found_tasks = [
-        task for task in tasks_db
-        if search_query in task["title"].lower()
-        or search_query in (task["description"] or "").lower()
-    ]
+    tasks = db.scalars(
+        select(Task).where(
+            or_(
+                Task.title.ilike(keyword),
+                Task.description.ilike(keyword)
+            )
+        )
+    ).all()
 
-    if not found_tasks:
+    if not tasks:
         raise HTTPException(
             status_code=404,
             detail="Задачи по вашему запросу не найдены"
         )
 
-    return {
-        "query": q,
-        "count": len(found_tasks),
-        "tasks": found_tasks
-    }
+    return tasks
 
 
-# Получение задачи по ID
+# Получить задачу по ID
 @router.get("/{task_id}", response_model=TaskResponse)
-async def get_task_by_id(task_id: int) -> TaskResponse:
-    task = next(
-        (t for t in tasks_db if t["id"] == task_id),
-        None
-    )
+def get_task_by_id(
+    task_id: int,
+    db: Session = Depends(get_db)
+):
+    task = db.get(Task, task_id)
 
     if task is None:
         raise HTTPException(
@@ -107,53 +112,43 @@ async def get_task_by_id(task_id: int) -> TaskResponse:
     return task
 
 
-# Создание новой задачи
+# Создать новую задачу
 @router.post(
     "/",
     response_model=TaskResponse,
     status_code=status.HTTP_201_CREATED
 )
-async def create_task(task: TaskCreate) -> TaskResponse:
-    if task.is_important and task.is_urgent:
-        quadrant = "Q1"
-    elif task.is_important and not task.is_urgent:
-        quadrant = "Q2"
-    elif not task.is_important and task.is_urgent:
-        quadrant = "Q3"
-    else:
-        quadrant = "Q4"
+def create_task(
+    task: TaskCreate,
+    db: Session = Depends(get_db)
+):
+    new_task = Task(
+        title=task.title,
+        description=task.description,
+        is_important=task.is_important,
+        is_urgent=task.is_urgent,
+        quadrant=calculate_quadrant(
+            task.is_important,
+            task.is_urgent
+        ),
+        completed=False
+    )
 
-    new_id = max(
-        [t["id"] for t in tasks_db],
-        default=0
-    ) + 1
-
-    new_task = {
-        "id": new_id,
-        "title": task.title,
-        "description": task.description,
-        "is_important": task.is_important,
-        "is_urgent": task.is_urgent,
-        "quadrant": quadrant,
-        "completed": False,
-        "created_at": datetime.now()
-    }
-
-    tasks_db.append(new_task)
+    db.add(new_task)
+    db.commit()
+    db.refresh(new_task)
 
     return new_task
 
 
-# Обновление задачи
+# Обновить задачу
 @router.put("/{task_id}", response_model=TaskResponse)
-async def update_task(
+def update_task(
     task_id: int,
-    task_update: TaskUpdate
-) -> TaskResponse:
-    task = next(
-        (t for t in tasks_db if t["id"] == task_id),
-        None
-    )
+    task_update: TaskUpdate,
+    db: Session = Depends(get_db)
+):
+    task = db.get(Task, task_id)
 
     if task is None:
         raise HTTPException(
@@ -161,39 +156,30 @@ async def update_task(
             detail="Задача не найдена"
         )
 
-    update_data = task_update.model_dump(
-        exclude_unset=True
-    )
+    update_data = task_update.model_dump(exclude_unset=True)
 
     for field, value in update_data.items():
-        task[field] = value
+        setattr(task, field, value)
 
-    if (
-        "is_important" in update_data
-        or "is_urgent" in update_data
-    ):
-        if task["is_important"] and task["is_urgent"]:
-            task["quadrant"] = "Q1"
-        elif task["is_important"] and not task["is_urgent"]:
-            task["quadrant"] = "Q2"
-        elif not task["is_important"] and task["is_urgent"]:
-            task["quadrant"] = "Q3"
-        else:
-            task["quadrant"] = "Q4"
+    if "is_important" in update_data or "is_urgent" in update_data:
+        task.quadrant = calculate_quadrant(
+            task.is_important,
+            task.is_urgent
+        )
+
+    db.commit()
+    db.refresh(task)
 
     return task
 
 
-# Отметка задачи как выполненной
-@router.patch(
-    "/{task_id}/complete",
-    response_model=TaskResponse
-)
-async def complete_task(task_id: int) -> TaskResponse:
-    task = next(
-        (t for t in tasks_db if t["id"] == task_id),
-        None
-    )
+# Отметить задачу выполненной
+@router.patch("/{task_id}/complete", response_model=TaskResponse)
+def complete_task(
+    task_id: int,
+    db: Session = Depends(get_db)
+):
+    task = db.get(Task, task_id)
 
     if task is None:
         raise HTTPException(
@@ -201,22 +187,24 @@ async def complete_task(task_id: int) -> TaskResponse:
             detail="Задача не найдена"
         )
 
-    task["completed"] = True
-    task["completed_at"] = datetime.now()
+    task.completed = True
+
+    db.commit()
+    db.refresh(task)
 
     return task
 
 
-# Удаление задачи
+# Удалить задачу
 @router.delete(
     "/{task_id}",
     status_code=status.HTTP_204_NO_CONTENT
 )
-async def delete_task(task_id: int):
-    task = next(
-        (t for t in tasks_db if t["id"] == task_id),
-        None
-    )
+def delete_task(
+    task_id: int,
+    db: Session = Depends(get_db)
+):
+    task = db.get(Task, task_id)
 
     if task is None:
         raise HTTPException(
@@ -224,8 +212,7 @@ async def delete_task(task_id: int):
             detail="Задача не найдена"
         )
 
-    tasks_db.remove(task)
+    db.delete(task)
+    db.commit()
 
-    return Response(
-        status_code=status.HTTP_204_NO_CONTENT
-    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

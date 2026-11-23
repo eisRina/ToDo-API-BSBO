@@ -1,48 +1,57 @@
-# Настройки БД (добавим на следующих практических)
 
-from typing import List, Dict, Any
-from datetime import datetime
+import os
+from urllib.parse import urlparse, unquote
 
-# Временное хранилище задач в памяти приложения
-tasks_db: List[Dict[str, Any]] = [
-    {
-        "id": 1,
-        "title": "Сдать проект по FastAPI",
-        "description": "Завершить разработку API и написать документацию",
-        "is_important": True,
-        "is_urgent": True,
-        "quadrant": "Q1",
-        "completed": False,
-        "created_at": datetime.now()
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.engine import URL
+from sqlalchemy.orm import DeclarativeBase, sessionmaker
+
+load_dotenv(override=True)
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL не найден в файле .env")
+
+db = urlparse(DATABASE_URL)
+
+# Формируем подключение к PostgreSQL через psycopg2
+connection_url = URL.create(
+    drivername="postgresql+psycopg2",
+    username=unquote(db.username),
+    password=os.getenv("DB_PASSWORD"),
+    host=db.hostname,
+    port=db.port,
+    database=db.path.lstrip("/")
+)
+
+engine = create_engine(
+    connection_url,
+    connect_args={
+        "sslmode": "require",
+        "connect_timeout": 10
     },
-    {
-        "id": 2,
-        "title": "Изучить SQLAlchemy",
-        "description": "Прочитать документацию и попробовать примеры",
-        "is_important": True,
-        "is_urgent": False,
-        "quadrant": "Q2",
-        "completed": False,
-        "created_at": datetime.now()
-    },
-    {
-        "id": 3,
-        "title": "Сходить на лекцию",
-        "description": None,
-        "is_important": False,
-        "is_urgent": True,
-        "quadrant": "Q3",
-        "completed": False,
-        "created_at": datetime.now()
-    },
-    {
-        "id": 4,
-        "title": "Посмотреть сериал",
-        "description": "Новый сезон любимого сериала",
-        "is_important": False,
-        "is_urgent": False,
-        "quadrant": "Q4",
-        "completed": True,
-        "created_at": datetime.now()
-    }
-]
+    pool_pre_ping=True
+)
+
+SessionLocal = sessionmaker(
+    bind=engine,
+    autoflush=False,
+    expire_on_commit=False
+)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+def get_db():
+    with SessionLocal() as session:
+        yield session
+
+
+def init_db():
+    # Создаёт отсутствующие таблицы по зарегистрированным моделям.
+    Base.metadata.create_all(bind=engine)
+    print("База данных инициализирована!")
