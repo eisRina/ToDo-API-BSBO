@@ -6,22 +6,21 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from database import init_db, get_db
-from routers import tasks, stats
+from routers import tasks, stats, auth, admin
 from scheduler import start_scheduler, update_task_urgency
+
+# Регистрируем все модели до инициализации БД
+import models
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Запуск приложения...")
 
-    # Инициализация PostgreSQL
     init_db()
     print("База данных инициализирована!")
 
-    # Пересчёт при запуске
     update_task_urgency()
-
-    # Запуск ежедневного расписания
     scheduler = start_scheduler()
 
     print("Приложение готово к работе!")
@@ -31,16 +30,15 @@ async def lifespan(app: FastAPI):
     finally:
         scheduler.shutdown(wait=False)
         print("Планировщик остановлен")
-        print("Остановка приложения...")
 
 
 app = FastAPI(
     title="ToDo лист API",
     description=(
-        "API для управления задачами с использованием "
-        "матрицы Эйзенхауэра и автоматического учёта дедлайнов"
+        "Многопользовательское API управления задачами "
+        "с JWT-аутентификацией, PostgreSQL и APScheduler"
     ),
-    version="2.1.0",
+    version="3.0.0",
     contact={
         "name": "Ролдугина Ирина Олеговна"
     },
@@ -48,34 +46,35 @@ app = FastAPI(
 )
 
 
+app.include_router(auth.router, prefix="/api/v2")
+app.include_router(admin.router, prefix="/api/v2")
 app.include_router(tasks.router, prefix="/api/v2")
 app.include_router(stats.router, prefix="/api/v2")
 
 
 @app.get("/")
-def welcome() -> dict:
+def welcome():
     return {
         "title": app.title,
         "description": app.description,
         "version": app.version,
         "database": "PostgreSQL (Supabase)",
+        "authentication": "JWT",
         "scheduler": "APScheduler",
         "docs": "/docs"
     }
 
 
 @app.get("/health")
-def health_check(db: Session = Depends(get_db)) -> dict:
+def health_check(db: Session = Depends(get_db)):
     try:
         db.execute(text("SELECT 1"))
-        db_status = "connected"
+        return {
+            "status": "healthy",
+            "database": "connected"
+        }
     except Exception:
-        db_status = "disconnected"
-
-    return {
-        "status": (
-            "healthy" if db_status == "connected"
-            else "unhealthy"
-        ),
-        "database": db_status
-    }
+        return {
+            "status": "unhealthy",
+            "database": "disconnected"
+        }

@@ -1,6 +1,11 @@
 
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Date, Text
+from sqlalchemy import (
+    Column, Integer, String, Boolean,
+    DateTime, Date, Text, ForeignKey
+)
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+
 from database import Base
 
 
@@ -17,11 +22,25 @@ class Task(Base):
     title = Column(String(100), nullable=False)
     description = Column(Text, nullable=True)
 
-    is_important = Column(Boolean, nullable=False, default=False)
-    is_urgent = Column(Boolean, nullable=False, default=False)
+    is_important = Column(
+        Boolean,
+        nullable=False,
+        default=False
+    )
+
+    is_urgent = Column(
+        Boolean,
+        nullable=False,
+        default=False
+    )
 
     quadrant = Column(String(2), nullable=False)
-    completed = Column(Boolean, nullable=False, default=False)
+
+    completed = Column(
+        Boolean,
+        nullable=False,
+        default=False
+    )
 
     created_at = Column(
         DateTime,
@@ -30,6 +49,18 @@ class Task(Base):
 
     deadline_at = Column(Date, nullable=True)
     completed_at = Column(DateTime, nullable=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True
+    )
+
+    owner = relationship(
+        "User",
+        back_populates="tasks"
+    )
 
     def __repr__(self):
         return f"<Task(id={self.id}, title='{self.title}')>"

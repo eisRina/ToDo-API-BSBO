@@ -2,11 +2,12 @@
 from datetime import date
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select, func, case, cast, Date
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import Task
+from dependencies import get_current_user
+from models import Task, User, UserRole
 from schemas import TimingStatsResponse
 from utils import calculate_days_until_deadline
 
@@ -17,50 +18,75 @@ router = APIRouter(
 )
 
 
+def get_user_tasks(
+    db: Session,
+    user: User
+):
+    query = select(Task)
+
+    if user.role != UserRole.ADMIN.value:
+        query = query.where(
+            Task.user_id == user.id
+        )
+
+    return db.scalars(query).all()
+
+
 @router.get("")
-def get_tasks_stats(db: Session = Depends(get_db)) -> dict:
-    total_tasks = db.scalar(select(func.count(Task.id))) or 0
+def get_tasks_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    tasks = get_user_tasks(db, current_user)
 
-    quadrant_rows = db.execute(
-        select(Task.quadrant, func.count(Task.id))
-        .group_by(Task.quadrant)
-    ).all()
-
-    by_quadrant = {
+    quadrants = {
         "Q1": 0,
         "Q2": 0,
         "Q3": 0,
         "Q4": 0
     }
 
-    for quadrant, count in quadrant_rows:
-        by_quadrant[quadrant] = count
+    completed = 0
 
-    completed_count = db.scalar(
-        select(func.count(Task.id))
-        .where(Task.completed.is_(True))
-    ) or 0
+    for task in tasks:
+        quadrants[task.quadrant] += 1
+
+        if task.completed:
+            completed += 1
 
     return {
-        "total_tasks": total_tasks,
-        "by_quadrant": by_quadrant,
+        "total_tasks": len(tasks),
+        "by_quadrant": quadrants,
         "by_status": {
-            "completed": completed_count,
-            "pending": total_tasks - completed_count
+            "completed": completed,
+            "pending": len(tasks) - completed
         }
     }
 
 
 @router.get("/deadlines")
-def get_deadline_stats(db: Session = Depends(get_db)) -> dict:
-    tasks = db.scalars(
-        select(Task)
-        .where(Task.completed.is_(False))
-        .order_by(Task.deadline_at, Task.id)
-    ).all()
+def get_deadline_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    tasks = get_user_tasks(db, current_user)
+
+    pending = [
+        task
+        for task in tasks
+        if not task.completed
+    ]
+
+    pending.sort(
+        key=lambda t: (
+            t.deadline_at is None,
+            t.deadline_at or date.max,
+            t.id
+        )
+    )
 
     return {
-        "total_pending": len(tasks),
+        "total_pending": len(pending),
         "tasks": [
             {
                 "id": task.id,
@@ -68,74 +94,55 @@ def get_deadline_stats(db: Session = Depends(get_db)) -> dict:
                 "description": task.description,
                 "created_at": task.created_at,
                 "deadline_at": task.deadline_at,
-                "days_until_deadline": calculate_days_until_deadline(
-                    task.deadline_at
+                "days_until_deadline": (
+                    calculate_days_until_deadline(
+                        task.deadline_at
+                    )
                 )
             }
-            for task in tasks
+            for task in pending
         ]
     }
 
 
-@router.get("/timing", response_model=TimingStatsResponse)
+@router.get(
+    "/timing",
+    response_model=TimingStatsResponse
+)
 def get_timing_stats(
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
+    tasks = get_user_tasks(db, current_user)
     today = date.today()
 
-    statement = select(
-        func.count(
-            case(
-                (
-                    (Task.completed.is_(True)) &
-                    (Task.deadline_at.is_not(None)) &
-                    (Task.completed_at.is_not(None)) &
-                    (cast(Task.completed_at, Date) <= Task.deadline_at),
-                    1
-                )
-            )
-        ).label("completed_on_time"),
+    completed_on_time = 0
+    completed_late = 0
+    on_plan_pending = 0
+    overtime_pending = 0
 
-        func.count(
-            case(
-                (
-                    (Task.completed.is_(True)) &
-                    (Task.deadline_at.is_not(None)) &
-                    (Task.completed_at.is_not(None)) &
-                    (cast(Task.completed_at, Date) > Task.deadline_at),
-                    1
-                )
-            )
-        ).label("completed_late"),
+    for task in tasks:
+        if task.deadline_at is None:
+            continue
 
-        func.count(
-            case(
-                (
-                    (Task.completed.is_(False)) &
-                    (Task.deadline_at.is_not(None)) &
-                    (Task.deadline_at >= today),
-                    1
-                )
-            )
-        ).label("on_plan_pending"),
+        if task.completed:
+            if task.completed_at is None:
+                continue
 
-        func.count(
-            case(
-                (
-                    (Task.completed.is_(False)) &
-                    (Task.deadline_at.is_not(None)) &
-                    (Task.deadline_at < today),
-                    1
-                )
-            )
-        ).label("overtime_pending")
-    )
+            if task.completed_at.date() <= task.deadline_at:
+                completed_on_time += 1
+            else:
+                completed_late += 1
 
-    result = db.execute(statement).one()
+        elif task.deadline_at < today:
+            overtime_pending += 1
+
+        else:
+            on_plan_pending += 1
 
     return TimingStatsResponse(
-        completed_on_time=result.completed_on_time,
-        completed_late=result.completed_late,
-        on_plan_pending=result.on_plan_pending,
-        overtime_pending=result.overtime_pending
+        completed_on_time=completed_on_time,
+        completed_late=completed_late,
+        on_plan_pending=on_plan_pending,
+        overtime_pending=overtime_pending
     )
