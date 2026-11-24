@@ -1,14 +1,18 @@
 
-from datetime import date
+from datetime import date, datetime
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import (
+    APIRouter, Depends, HTTPException,
+    Query, Response, status
+)
 from sqlalchemy import select, or_
 from sqlalchemy.orm import Session
 
 from database import get_db
 from models import Task
 from schemas import TaskCreate, TaskUpdate, TaskResponse
+from utils import calculate_urgency, determine_quadrant
 
 
 router = APIRouter(
@@ -18,35 +22,14 @@ router = APIRouter(
 )
 
 
-# Автоматический расчет срочности
-def calculate_urgency(deadline_at: date) -> bool:
-    days_left = (deadline_at - date.today()).days
-    return days_left <= 3
-
-
-# Определение квадранта
-def calculate_quadrant(is_important: bool, is_urgent: bool) -> str:
-    if is_important and is_urgent:
-        return "Q1"
-    if is_important:
-        return "Q2"
-    if is_urgent:
-        return "Q3"
-    return "Q4"
-
-
-# Пересчет срочности и квадранта
-def update_deadline_logic(task: Task):
-    if task.deadline_at is not None:
-        task.is_urgent = calculate_urgency(task.deadline_at)
-
-    task.quadrant = calculate_quadrant(
+def recalculate_task(task: Task):
+    task.is_urgent = calculate_urgency(task.deadline_at)
+    task.quadrant = determine_quadrant(
         task.is_important,
         task.is_urgent
     )
 
 
-# Получить все задачи
 @router.get("", response_model=List[TaskResponse])
 def get_all_tasks(db: Session = Depends(get_db)):
     return db.scalars(
@@ -54,7 +37,18 @@ def get_all_tasks(db: Session = Depends(get_db)):
     ).all()
 
 
-# Получить задачи по квадранту
+@router.get("/today", response_model=List[TaskResponse])
+def get_tasks_today(db: Session = Depends(get_db)):
+    return db.scalars(
+        select(Task)
+        .where(
+            Task.deadline_at == date.today(),
+            Task.completed.is_(False)
+        )
+        .order_by(Task.id)
+    ).all()
+
+
 @router.get("/quadrant/{quadrant}", response_model=List[TaskResponse])
 def get_tasks_by_quadrant(
     quadrant: str,
@@ -71,7 +65,6 @@ def get_tasks_by_quadrant(
     ).all()
 
 
-# Получить задачи по статусу
 @router.get("/status/{task_status}", response_model=List[TaskResponse])
 def get_tasks_by_status(
     task_status: str,
@@ -85,12 +78,11 @@ def get_tasks_by_status(
 
     return db.scalars(
         select(Task).where(
-            Task.completed == (task_status == "completed")
+            Task.completed.is_(task_status == "completed")
         )
     ).all()
 
 
-# Поиск задач
 @router.get("/search", response_model=List[TaskResponse])
 def search_tasks(
     q: str = Query(..., min_length=2),
@@ -116,7 +108,6 @@ def search_tasks(
     return tasks
 
 
-# Получить задачу по ID
 @router.get("/{task_id}", response_model=TaskResponse)
 def get_task_by_id(
     task_id: int,
@@ -133,7 +124,6 @@ def get_task_by_id(
     return task
 
 
-# Создать задачу с дедлайном
 @router.post(
     "/",
     response_model=TaskResponse,
@@ -151,7 +141,7 @@ def create_task(
         is_important=task.is_important,
         deadline_at=task.deadline_at,
         is_urgent=is_urgent,
-        quadrant=calculate_quadrant(
+        quadrant=determine_quadrant(
             task.is_important,
             is_urgent
         ),
@@ -165,7 +155,6 @@ def create_task(
     return new_task
 
 
-# Обновить задачу
 @router.put("/{task_id}", response_model=TaskResponse)
 def update_task(
     task_id: int,
@@ -180,12 +169,18 @@ def update_task(
             detail="Задача не найдена"
         )
 
-    update_data = task_update.model_dump(exclude_unset=True)
+    changes = task_update.model_dump(exclude_unset=True)
 
-    for field, value in update_data.items():
+    for field, value in changes.items():
         setattr(task, field, value)
 
-    update_deadline_logic(task)
+    if "completed" in changes:
+        if task.completed and task.completed_at is None:
+            task.completed_at = datetime.now()
+        elif not task.completed:
+            task.completed_at = None
+
+    recalculate_task(task)
 
     db.commit()
     db.refresh(task)
@@ -193,7 +188,6 @@ def update_task(
     return task
 
 
-# Завершить задачу
 @router.patch("/{task_id}/complete", response_model=TaskResponse)
 def complete_task(
     task_id: int,
@@ -207,7 +201,9 @@ def complete_task(
             detail="Задача не найдена"
         )
 
-    task.completed = True
+    if not task.completed:
+        task.completed = True
+        task.completed_at = datetime.now()
 
     db.commit()
     db.refresh(task)
@@ -215,7 +211,6 @@ def complete_task(
     return task
 
 
-# Удалить задачу
 @router.delete(
     "/{task_id}",
     status_code=status.HTTP_204_NO_CONTENT

@@ -1,7 +1,6 @@
 
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Date, Text
 from sqlalchemy.sql import func
-
 from database import Base
 
 
@@ -19,9 +18,6 @@ class Task(Base):
     description = Column(Text, nullable=True)
 
     is_important = Column(Boolean, nullable=False, default=False)
-
-    # Срочность теперь рассчитывается по дедлайну.
-    # Столбец сохраняем для совместимости с PostgreSQL.
     is_urgent = Column(Boolean, nullable=False, default=False)
 
     quadrant = Column(String(2), nullable=False)
@@ -33,6 +29,7 @@ class Task(Base):
     )
 
     deadline_at = Column(Date, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
 
     def __repr__(self):
         return f"<Task(id={self.id}, title='{self.title}')>"

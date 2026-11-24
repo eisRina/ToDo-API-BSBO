@@ -6,23 +6,41 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from database import init_db, get_db
-from models import Task
 from routers import tasks, stats
+from scheduler import start_scheduler, update_task_urgency
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Запуск приложения...")
+
+    # Инициализация PostgreSQL
     init_db()
-    print("База данных готова к работе!")
-    yield
-    print("Остановка приложения...")
+    print("База данных инициализирована!")
+
+    # Пересчёт при запуске
+    update_task_urgency()
+
+    # Запуск ежедневного расписания
+    scheduler = start_scheduler()
+
+    print("Приложение готово к работе!")
+
+    try:
+        yield
+    finally:
+        scheduler.shutdown(wait=False)
+        print("Планировщик остановлен")
+        print("Остановка приложения...")
 
 
 app = FastAPI(
     title="ToDo лист API",
-    description="API для управления задачами с использованием матрицы Эйзенхауэра",
-    version="2.0.0",
+    description=(
+        "API для управления задачами с использованием "
+        "матрицы Эйзенхауэра и автоматического учёта дедлайнов"
+    ),
+    version="2.1.0",
     contact={
         "name": "Ролдугина Ирина Олеговна"
     },
@@ -30,7 +48,6 @@ app = FastAPI(
 )
 
 
-# Подключение маршрутов API версии 2
 app.include_router(tasks.router, prefix="/api/v2")
 app.include_router(stats.router, prefix="/api/v2")
 
@@ -42,6 +59,7 @@ def welcome() -> dict:
         "description": app.description,
         "version": app.version,
         "database": "PostgreSQL (Supabase)",
+        "scheduler": "APScheduler",
         "docs": "/docs"
     }
 
@@ -55,6 +73,9 @@ def health_check(db: Session = Depends(get_db)) -> dict:
         db_status = "disconnected"
 
     return {
-        "status": "healthy" if db_status == "connected" else "unhealthy",
+        "status": (
+            "healthy" if db_status == "connected"
+            else "unhealthy"
+        ),
         "database": db_status
     }
